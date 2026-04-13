@@ -6,23 +6,42 @@ import { CodeView } from './CodeView';
 interface ComponentCardProps {
   component: GeneratedComponent;
   onRemove: (id: string) => void;
+  onRegenerate: (prompt: string) => void;
+  isLoading: boolean;
 }
 
 type Tab = 'preview' | 'code';
 
-export function ComponentCard({ component, onRemove }: ComponentCardProps) {
+export function ComponentCard({ component, onRemove, onRegenerate, isLoading }: ComponentCardProps) {
   const [activeTab, setActiveTab] = useState<Tab>('preview');
+  const [previewKey, setPreviewKey] = useState(0);
 
   return (
     <div className="component-card">
       <div className="card-header">
         <p className="card-prompt">{component.prompt}</p>
-        <button
-          className="btn-remove"
-          onClick={() => onRemove(component.id)}
-        >
-          삭제
-        </button>
+        <div className="card-actions">
+          <button
+            className="btn-refresh"
+            onClick={() => setPreviewKey((k) => k + 1)}
+            title="미리보기 새로고침"
+          >
+            ↻
+          </button>
+          <button
+            className="btn-regenerate"
+            onClick={() => onRegenerate(component.prompt)}
+            disabled={isLoading}
+          >
+            {isLoading ? '생성 중...' : '재생성'}
+          </button>
+          <button
+            className="btn-remove"
+            onClick={() => onRemove(component.id)}
+          >
+            삭제
+          </button>
+        </div>
       </div>
       <div className="card-tabs">
         <button
@@ -40,7 +59,7 @@ export function ComponentCard({ component, onRemove }: ComponentCardProps) {
       </div>
       <div className="card-content">
         {activeTab === 'preview' ? (
-          <LivePreview code={component.code} />
+          <LivePreview key={previewKey} code={component.code} />
         ) : (
           <CodeView code={component.code} />
         )}
