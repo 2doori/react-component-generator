@@ -433,8 +433,15 @@
 /* Tabs */
 .card-tabs {
   display: flex;
+  justify-content: space-between;
+  align-items: center;
   border-bottom: 2px solid #e5e7eb;
   background: linear-gradient(135deg, rgba(14, 165, 233, 0.02) 0%, rgba(251, 191, 36, 0.02) 100%);
+}
+
+.card-tabs > div:first-child {
+  display: flex;
+  flex: 1;
 }
 
 .tab {
@@ -457,6 +464,36 @@
 .tab--active {
   color: #0ea5e9;
   box-shadow: inset 0 -3px 0 #0ea5e9;
+}
+
+/* Viewport Controls */
+.viewport-controls {
+  display: flex;
+  gap: 0.4rem;
+  padding-right: 0.6rem;
+}
+
+.btn-viewport {
+  padding: 0.4rem 0.6rem;
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  color: #0284c7;
+  cursor: pointer;
+  font-size: 1rem;
+  border-radius: 0.4rem;
+  transition: all 0.2s;
+}
+
+.btn-viewport:hover {
+  color: #0c4a6e;
+  background: rgba(14, 165, 233, 0.05);
+  border-color: #0ea5e9;
+}
+
+.btn-viewport--active {
+  color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.1);
+  border-color: #0ea5e9;
 }
 
 /* Card Content */
@@ -499,6 +536,7 @@
   background: white;
   border-radius: 8px;
   border: 2px dashed #0ea5e9;
+  transition: max-width 0.3s ease;
 }
 
 .preview-error {
