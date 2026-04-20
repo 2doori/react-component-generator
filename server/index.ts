@@ -49,6 +49,10 @@ const CORS_HEADERS = {
 };
 
 type Provider = 'anthropic' | 'google';
+type SSEEvent =
+  | { type: 'chunk'; text: string }
+  | { type: 'done'; code: string }
+  | { type: 'error'; message: string };
 
 const ENV_KEYS: Record<Provider, string | undefined> = {
   anthropic: process.env.ANTHROPIC_API_KEY,
@@ -59,7 +63,7 @@ function resolveApiKey(provider: Provider, clientKey?: string): string | null {
   return clientKey || ENV_KEYS[provider] || null;
 }
 
-async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
+async function* callAnthropicStream(prompt: string, apiKey: string): AsyncGenerator<string> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -70,6 +74,7 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 4096,
+      stream: true,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -79,19 +84,42 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
     throw new Error(`Claude API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    content: Array<{ type: string; text?: string }>;
-  };
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
 
-  return data.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() ?? '';
+
+    for (const part of parts) {
+      for (const line of part.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') continue;
+        try {
+          const data = JSON.parse(raw) as {
+            type: string;
+            delta?: { type: string; text?: string };
+          };
+          if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta.text) {
+            yield data.delta.text;
+          }
+        } catch {
+          // 잘못된 JSON 무시
+        }
+      }
+    }
+  }
 }
 
-async function callGoogle(prompt: string, apiKey: string): Promise<string> {
+async function* callGoogleStream(prompt: string, apiKey: string): AsyncGenerator<string> {
   const model = 'gemini-2.5-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -107,23 +135,41 @@ async function callGoogle(prompt: string, apiKey: string): Promise<string> {
     throw new Error(`Gemini API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    candidates: Array<{
-      content: { parts: Array<{ text?: string }> };
-      finishReason?: string;
-    }>;
-  };
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
 
-  const candidate = data.candidates?.[0];
-  if (candidate?.finishReason === 'MAX_TOKENS') {
-    throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() ?? '';
+
+    for (const part of parts) {
+      for (const line of part.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6)) as {
+            candidates?: Array<{
+              content: { parts: Array<{ text?: string }> };
+              finishReason?: string;
+            }>;
+          };
+          const candidate = data.candidates?.[0];
+          if (candidate?.finishReason === 'MAX_TOKENS') {
+            throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
+          }
+          const text = candidate?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
+          if (text) yield text;
+        } catch (err) {
+          if (err instanceof Error && err.message.includes('잘렸습니다')) throw err;
+          // 잘못된 JSON 무시
+        }
+      }
+    }
   }
-
-  return (
-    candidate?.content?.parts
-      ?.map((part) => part.text)
-      ?.join('') ?? ''
-  );
 }
 
 function stripCodeFences(text: string): string {
@@ -143,8 +189,13 @@ function ensureRenderCall(code: string): string {
   return code;
 }
 
+function sseEncode(event: SSEEvent): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
+}
+
 const server = Bun.serve({
   port: 3002,
+  idleTimeout: 120, // SSE 스트리밍이 끊기지 않도록 충분히 설정
   async fetch(req) {
     if (req.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
@@ -165,65 +216,76 @@ const server = Bun.serve({
     }
 
     if (req.method === 'POST' && url.pathname === '/api/generate') {
+      let prompt: string;
+      let apiKey: string | undefined;
+      let provider: Provider;
+
       try {
-        const { prompt, apiKey, provider = 'anthropic' } = (await req.json()) as {
+        const body = (await req.json()) as {
           prompt: string;
           apiKey?: string;
           provider?: Provider;
         };
+        prompt = body.prompt;
+        apiKey = body.apiKey;
+        provider = body.provider ?? 'anthropic';
+      } catch {
+        return Response.json({ error: 'Invalid request body' }, { status: 400, headers: CORS_HEADERS });
+      }
 
-        const resolvedKey = resolveApiKey(provider, apiKey);
+      const resolvedKey = resolveApiKey(provider, apiKey);
 
-        if (!resolvedKey) {
-          return Response.json(
-            { error: `API key is required. Set ${provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GOOGLE_API_KEY'} in .env or enter it manually.` },
-            { status: 400, headers: CORS_HEADERS }
-          );
-        }
-
-        if (!prompt) {
-          return Response.json(
-            { error: 'Prompt is required' },
-            { status: 400, headers: CORS_HEADERS }
-          );
-        }
-
-        const text =
-          provider === 'google'
-            ? await callGoogle(prompt, resolvedKey)
-            : await callAnthropic(prompt, resolvedKey);
-
-        const code = ensureRenderCall(stripCodeFences(text));
-
-        return Response.json({ code }, { headers: CORS_HEADERS });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
-
-        if (message.includes('503')) {
-          return Response.json(
-            { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
-            { status: 503, headers: CORS_HEADERS }
-          );
-        }
-
-        if (message.includes('429')) {
-          return Response.json(
-            { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
-            { status: 429, headers: CORS_HEADERS }
-          );
-        }
-
+      if (!resolvedKey) {
         return Response.json(
-          { error: message },
-          { status: 500, headers: CORS_HEADERS }
+          { error: `API key is required. Set ${provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GOOGLE_API_KEY'} in .env or enter it manually.` },
+          { status: 400, headers: CORS_HEADERS }
         );
       }
+
+      if (!prompt) {
+        return Response.json({ error: 'Prompt is required' }, { status: 400, headers: CORS_HEADERS });
+      }
+
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (event: SSEEvent) => {
+            controller.enqueue(encoder.encode(sseEncode(event)));
+          };
+
+          try {
+            let fullText = '';
+            const gen =
+              provider === 'google'
+                ? callGoogleStream(prompt, resolvedKey)
+                : callAnthropicStream(prompt, resolvedKey);
+
+            for await (const chunk of gen) {
+              fullText += chunk;
+              send({ type: 'chunk', text: chunk });
+            }
+
+            send({ type: 'done', code: ensureRenderCall(stripCodeFences(fullText)) });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : 'Unknown error';
+            send({ type: 'error', message });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          ...CORS_HEADERS,
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
     }
 
-    return Response.json(
-      { error: 'Not found' },
-      { status: 404, headers: CORS_HEADERS }
-    );
+    return Response.json({ error: 'Not found' }, { status: 404, headers: CORS_HEADERS });
   },
 });
 
