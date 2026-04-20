@@ -1,4 +1,5 @@
 export type Provider = 'anthropic' | 'google';
+export type ViewportSize = 'mobile' | 'tablet' | 'desktop';
 
 export interface GeneratedComponent {
   id: string;

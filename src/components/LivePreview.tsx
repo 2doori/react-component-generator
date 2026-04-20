@@ -1,10 +1,18 @@
 import { LiveProvider, LivePreview as ReactLivePreview, LiveError } from 'react-live';
+import type { ViewportSize } from '../types';
 
 interface LivePreviewProps {
   code: string;
+  viewportSize?: ViewportSize;
 }
 
-export function LivePreview({ code }: LivePreviewProps) {
+const viewportWidths: Record<ViewportSize, string> = {
+  mobile: '375px',
+  tablet: '768px',
+  desktop: '100%',
+};
+
+export function LivePreview({ code, viewportSize = 'desktop' }: LivePreviewProps) {
   return (
     <div className="preview-panel">
       <div className="panel-header">
@@ -12,7 +20,10 @@ export function LivePreview({ code }: LivePreviewProps) {
       </div>
       <div className="preview-content">
         <LiveProvider code={code} noInline>
-          <div className="preview-render">
+          <div
+            className="preview-render"
+            style={{ maxWidth: viewportWidths[viewportSize] }}
+          >
             <ReactLivePreview />
           </div>
           <LiveError className="preview-error" />
