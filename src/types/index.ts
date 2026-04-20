@@ -6,4 +6,10 @@ export interface GeneratedComponent {
   prompt: string;
   code: string;
   createdAt: Date;
+  isStreaming?: boolean;
 }
+
+export type SSEEvent =
+  | { type: 'chunk'; text: string }
+  | { type: 'done'; code: string }
+  | { type: 'error'; message: string };
